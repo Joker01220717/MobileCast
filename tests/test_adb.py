@@ -112,3 +112,24 @@ def test_device_ip_returns_none_when_unavailable(monkeypatch):
     client = Adb(adb_path="adb")
     monkeypatch.setattr(client, "shell", lambda *a, **k: "")
     assert client.device_ip("serial-1") is None
+
+
+def test_device_display_info(monkeypatch):
+    client = Adb(adb_path="adb")
+    outputs = ["Physical size: 1200x2670\n", "120\n"]
+    monkeypatch.setattr(client, "shell", lambda *a, **k: outputs.pop(0))
+    info = client.device_display_info("serial-1")
+    assert (info.width, info.height, info.refresh_rate) == (1200, 2670, 120.0)
+    assert info.max_dimension == 2670
+
+
+def test_device_display_info_falls_back_to_dumpsys(monkeypatch):
+    client = Adb(adb_path="adb")
+    outputs = [
+        "Physical size: 1080x2400\n",
+        "null\n",
+        "DisplayMode{peakRefreshRate=60.0} DisplayMode{peakRefreshRate=90.0}\n",
+    ]
+    monkeypatch.setattr(client, "shell", lambda *a, **k: outputs.pop(0))
+    info = client.device_display_info("serial-1")
+    assert info.refresh_rate == 90.0

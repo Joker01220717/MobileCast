@@ -8,11 +8,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .android.adb import Adb
+from .android.scrcpy_server import ScrcpyOptions
 from .android.session import AndroidSession
 
 __all__ = ["SessionError", "SessionManager"]
 
-SessionFactory = Callable[[str], AndroidSession]
+SessionFactory = Callable[[str, "ScrcpyOptions | None"], AndroidSession]
 
 
 class SessionError(RuntimeError):
@@ -29,19 +30,19 @@ class SessionManager:
         self._factory = session_factory or self._default_factory
         self._sessions: dict[str, AndroidSession] = {}
 
-    def _default_factory(self, serial: str) -> AndroidSession:
+    def _default_factory(self, serial: str, options: ScrcpyOptions | None = None) -> AndroidSession:
         from .android.scrcpy_server import find_server_jar
 
         if self._adb is None:
             self._adb = Adb()
-        return AndroidSession(self._adb, serial, find_server_jar())
+        return AndroidSession(self._adb, serial, find_server_jar(), options=options)
 
     # ---- 会话生命周期 ---------------------------------------------
-    def open(self, serial: str) -> AndroidSession:
+    def open(self, serial: str, options: ScrcpyOptions | None = None) -> AndroidSession:
         """为指定设备建立会话；同一设备不允许重复开启。"""
         if serial in self._sessions:
             raise SessionError(f"设备 {serial} 已有会话在运行")
-        session = self._factory(serial)
+        session = self._factory(serial, options)
         session.start()
         self._sessions[serial] = session
         return session

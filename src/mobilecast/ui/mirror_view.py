@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QImage,
     QInputMethodEvent,
@@ -66,12 +66,14 @@ class MirrorView(QWidget):
     key_event = Signal(object)  # KeyEvent
     text_event = Signal(object)  # TextEvent
     scroll_event = Signal(object)  # ScrollEvent
+    preedit_changed = Signal(str)  # 输入法组合中的文本（尚未提交）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._image: QImage | None = None
         self._device_size = QSize(0, 0)
         self._buttons_down = 0
+        self._preedit = ""
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(240, 320)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -114,6 +116,19 @@ class MirrorView(QWidget):
         if target is not None and self._image is not None:
             x, y, w, h = target
             painter.drawImage(x, y, self._image.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio))
+        if self._preedit:
+            # 输入法组合中的文本（打字过程中给用户反馈）
+            rect = self.rect().adjusted(20, 0, -20, -20)
+            painter.fillRect(
+                rect.adjusted(0, rect.height() - 48, 0, 0),
+                Qt.GlobalColor.black,
+            )
+            painter.setPen(Qt.GlobalColor.white)
+            painter.drawText(
+                rect.adjusted(0, rect.height() - 48, 0, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                f"⌨ {self._preedit}",
+            )
         painter.end()
 
     # ---- 坐标映射 ------------------------------------------------
@@ -201,13 +216,26 @@ class MirrorView(QWidget):
         self._handle_key(KeyAction.UP, event)
 
     def inputMethodEvent(self, event: QInputMethodEvent) -> None:  # noqa: N802
-        """输入法（中文 / emoji）提交的文本走这里。"""
-        if event.commitString():
-            self.text_event.emit(TextEvent(text=event.commitString()))
+        """输入法文本走这里：提交（commitString）即上屏，组合中显示预编辑。"""
+        commit = event.commitString()
+        if commit:
+            self.text_event.emit(TextEvent(text=commit))
+        self._preedit = event.preeditString()
+        self.preedit_changed.emit(self._preedit)
+        self.update()
         super().inputMethodEvent(event)
+
+    def inputMethodQuery(self, query: Qt.InputMethodQuery):  # noqa: N802
+        """让输入法候选框跟随画面中央，而不是飘到屏幕角落。"""
+        if query == Qt.InputMethodQuery.ImCursorRectangle:
+            return QRect(self.width() // 2, self.height() // 2, 2, 2)
+        return super().inputMethodQuery(query)
 
     def _handle_key(self, action: KeyAction, event: QKeyEvent) -> None:
         if action is KeyAction.DOWN:
+            if self._preedit:
+                # 输入法组合中：文本由 inputMethodEvent 提交，避免重复输入
+                return
             modifiers = event.modifiers()
             shortcut_mods = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
             if not (modifiers & shortcut_mods):

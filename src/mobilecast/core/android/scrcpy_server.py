@@ -56,16 +56,30 @@ class ScrcpyError(RuntimeError):
 class ScrcpyOptions:
     """server 启动参数（对应 scrcpy server 的 key=value 选项）。"""
 
-    max_size: int = 1280
+    max_size: int = 0  # 0 = 设备原始分辨率
     video_bit_rate: int = 8_000_000
     video_codec: str = "h264"
-    max_fps: int | None = None
+    max_fps: float | None = None
     control: bool = True
     audio: bool = False
     stay_awake: bool = False
     power_off_on_close: bool = False
     show_touches: bool = False
     cleanup: bool = True
+
+    @classmethod
+    def for_display(cls, info, **kwargs) -> ScrcpyOptions:
+        """按设备屏幕参数生成默认画质：原始分辨率 + 峰值刷新率。"""
+        options = cls()
+        if info is not None and info.width > 0:
+            options.max_size = info.max_dimension
+            fps = info.refresh_rate if info.refresh_rate > 0 else 60.0
+            options.video_bit_rate = estimate_bit_rate(info.width, info.height, fps)
+            if info.refresh_rate > 0:
+                options.max_fps = info.refresh_rate
+        for key, value in kwargs.items():
+            setattr(options, key, value)
+        return options
 
     def to_server_args(self) -> list[str]:
         args = [
@@ -83,7 +97,7 @@ class ScrcpyOptions:
             # 客户端用它区分「真连上」与「adb forward 的假连接」
         ]
         if self.max_fps is not None:
-            args.append(f"max_fps={self.max_fps}")
+            args.append(f"max_fps={self.max_fps:g}")
         return args
 
 
@@ -91,6 +105,11 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def estimate_bit_rate(width: int, height: int, fps: float) -> int:
+    """按像素数 × 帧率估算码率（1080p@60 ≈ 7.5 Mbps，接近 scrcpy 默认）。"""
+    return max(2_000_000, min(30_000_000, int(width * height * fps * 0.06)))
 
 
 def server_version_from_jar(path: str | Path) -> str:
@@ -183,6 +202,9 @@ class ScrcpyServer:
                 last_error = exc
                 self.stop()
                 if attempt < attempts:
+                    # 仅在失败重试时清理残留 server：
+                    # 预清理会误杀其它并行会话（如另一实例 / scrcpy 官方客户端）
+                    self._kill_stale_servers()
                     log.warning(
                         "启动 scrcpy-server 失败（第 %d/%d 次），重试: %s", attempt, attempts, exc
                     )
@@ -196,7 +218,6 @@ class ScrcpyServer:
         if not self._server_jar.exists():
             raise ScrcpyError(f"缺少 scrcpy-server 文件: {self._server_jar}")
 
-        self._kill_stale_servers()
         socket_name = f"scrcpy_{self._scid}"
 
         try:

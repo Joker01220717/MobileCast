@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.android.adb import Adb, AdbError
-from ..core.android.scrcpy_server import ScrcpyError
+from ..core.android.scrcpy_server import ScrcpyError, ScrcpyOptions
 from ..core.session_manager import SessionError, SessionManager
 from .mirror_window import MirrorWindow
 from .tasks import AsyncTask
@@ -121,15 +121,30 @@ class MainWindow(QMainWindow):
             return
         self.connect_serial(serial)
 
-    def connect_serial(self, serial: str) -> None:
-        """连接指定设备并打开投屏窗口（供双击、按钮与 --serial 共用）。"""
+    def connect_serial(self, serial: str, options: ScrcpyOptions | None = None) -> None:
+        """连接指定设备并打开投屏窗口（供双击、按钮、--serial 与画质重连共用）。"""
         if self._manager.is_open(serial):
             self.statusBar().showMessage(f"设备 {serial} 已在投屏中")
             return
 
+        try:
+            adb = self._ensure_adb()
+        except AdbError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+
+        # 屏幕参数：决定默认画质（原始分辨率 + 峰值刷新率）并显示在状态栏
+        display_info = None
+        try:
+            display_info = adb.device_display_info(serial)
+        except AdbError as exc:
+            log.warning("读取屏幕参数失败 %s: %s", serial, exc)
+        if options is None:
+            options = ScrcpyOptions.for_display(display_info)
+
         self.statusBar().showMessage(f"正在连接 {serial} …")
         try:
-            session = self._manager.open(serial)
+            session = self._manager.open(serial, options)
         except (SessionError, ScrcpyError, AdbError, OSError, RuntimeError) as exc:
             log.warning("连接 %s 失败: %s", serial, exc)
             if isinstance(exc, ScrcpyError):
@@ -137,11 +152,23 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"连接失败: {exc}")
             return
 
-        window = MirrorWindow(session, on_close=self._on_window_closed)
+        window = MirrorWindow(
+            session,
+            on_close=self._on_window_closed,
+            on_reconnect=self._reconnect,
+            display_info=display_info,
+        )
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._windows[serial] = window
         window.show()
         self.refresh_devices()
+
+    def _reconnect(self, serial: str, options: ScrcpyOptions) -> None:
+        """按新画质重连（关闭旧窗口与会话后重新建立）。"""
+        window = self._windows.get(serial)
+        if window is not None:
+            window.close()  # 触发 _on_window_closed → 会话关闭
+        self.connect_serial(serial, options)
 
     def _on_window_closed(self, serial: str) -> None:
         self._windows.pop(serial, None)

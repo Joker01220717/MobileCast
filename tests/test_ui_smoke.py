@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from mobilecast.core.device import (  # noqa: E402
     KEYCODE_BACK,
@@ -24,6 +25,7 @@ from mobilecast.core.device import (  # noqa: E402
     VideoFrame,
 )
 from mobilecast.ui.mirror_view import MirrorView  # noqa: E402
+from mobilecast.ui.mirror_window import MirrorWindow  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -118,6 +120,9 @@ class FakeSessionStub:
     def send_input(self, event) -> None:
         self.sent.append(event)
 
+    def send_text(self, event) -> None:
+        self.sent.append(event)
+
     def send_clipboard(self, text: str, paste: bool = False) -> int:
         self.sent.append(("clipboard", text, paste))
         return 1
@@ -130,8 +135,6 @@ class FakeSessionStub:
 
 
 def test_mirror_window_lifecycle_and_clipboard_bridge(app):
-    from mobilecast.ui.mirror_window import MirrorWindow
-
     session = FakeSessionStub()
     closed: list[str] = []
     window = MirrorWindow(session, on_close=closed.append)
@@ -152,3 +155,82 @@ def test_mirror_window_lifecycle_and_clipboard_bridge(app):
 
     window.close()
     assert closed == ["FAKE-SERIAL"]  # 关闭窗口 → 通知管理器断开会话
+
+
+def test_text_input_aggregates_and_pastes(app):
+    """默认「剪贴板粘贴」模式：连续字符聚合后一次粘贴（支持中文/数字）。"""
+    from mobilecast.core.device import TextEvent
+
+    session = FakeSessionStub()
+    window = MirrorWindow(session)
+    window.show()
+
+    window._send_input(TextEvent(text="你"))
+    window._send_input(TextEvent(text="好"))
+    window._send_input(TextEvent(text="123"))
+    assert session.sent == []  # 聚合期间不发任何消息
+
+    window._flush_text()
+    assert ("clipboard", "你好123", True) in session.sent
+
+    # 切到按键模拟模式：文本直接作为 TextEvent 下发
+    window._paste_input_mode.setChecked(False)
+    window._send_input(TextEvent(text="abc"))
+    assert isinstance(session.sent[-1], TextEvent)
+    assert session.sent[-1].text == "abc"
+    window.close()
+
+
+def test_text_flushed_before_key_events(app):
+    """功能键之前必须先提交待粘贴文本，保证输入顺序正确。"""
+    from mobilecast.core.device import KEYCODE_BACK, KeyAction, KeyEvent, TextEvent
+
+    session = FakeSessionStub()
+    window = MirrorWindow(session)
+    window.show()
+
+    window._send_input(TextEvent(text="hi"))
+    window._send_input(KeyEvent(action=KeyAction.DOWN, keycode=KEYCODE_BACK))
+
+    assert session.sent[0] == ("clipboard", "hi", True)  # 文本先到
+    assert isinstance(session.sent[1], KeyEvent)  # 按键后到
+    window.close()
+
+
+def test_ime_commit_produces_text_event(app):
+    """输入法：组合中不发文本，提交（commitString）才发。"""
+    from PySide6.QtGui import QInputMethodEvent
+
+    view = _make_view()
+    events: list = []
+    preedits: list = []
+    view.text_event.connect(events.append)
+    view.preedit_changed.connect(preedits.append)
+
+    # 组合中（拼音 "nihao"）
+    composing = QInputMethodEvent("nihao", [])
+    QApplication.sendEvent(view, composing)
+    assert preedits == ["nihao"]
+    assert events == []  # 组合中不产生文本事件
+
+    # 提交
+    committed = QInputMethodEvent("", [])
+    committed.setCommitString("你好")
+    QApplication.sendEvent(view, committed)
+    assert [e.text for e in events] == ["你好"]
+    assert view._preedit == ""
+
+
+def test_keys_ignored_during_ime_composition(app):
+    """输入法组合期间的按键不应重复注入文本（防双输）。"""
+    from PySide6.QtGui import QInputMethodEvent
+
+    view = _make_view()
+    events: list = []
+    view.text_event.connect(events.append)
+
+    composing = QInputMethodEvent("abc", [])
+    QApplication.sendEvent(view, composing)
+
+    QTest.keyClick(view, Qt.Key.Key_A)  # 组合中的按键应被忽略
+    assert events == []

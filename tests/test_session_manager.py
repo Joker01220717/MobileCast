@@ -24,7 +24,7 @@ class FakeSession:
 
 @pytest.fixture()
 def manager():
-    def factory(serial: str) -> FakeSession:
+    def factory(serial: str, options=None) -> FakeSession:
         return FakeSession(serial)
 
     return SessionManager(adb=None, session_factory=factory)

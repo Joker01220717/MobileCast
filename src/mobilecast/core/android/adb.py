@@ -17,7 +17,7 @@ from pathlib import Path
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-__all__ = ["AdbError", "AdbDevice", "Adb", "find_adb"]
+__all__ = ["AdbError", "AdbDevice", "DisplayInfo", "Adb", "find_adb"]
 
 
 class AdbError(RuntimeError):
@@ -37,6 +37,19 @@ class AdbDevice:
     @property
     def model(self) -> str:
         return self.props.get("model", self.serial)
+
+
+@dataclass(frozen=True)
+class DisplayInfo:
+    """设备屏幕的物理参数（用于设置串流分辨率 / 帧率上限）。"""
+
+    width: int
+    height: int
+    refresh_rate: float = 0.0  # 峰值刷新率（Hz）
+
+    @property
+    def max_dimension(self) -> int:
+        return max(self.width, self.height)
 
 
 def find_adb() -> str:
@@ -198,3 +211,35 @@ class Adb:
 
     def getprop(self, serial: str, name: str) -> str:
         return self.shell(serial, "getprop", name).strip()
+
+    def device_display_info(self, serial: str) -> DisplayInfo:
+        """读取屏幕物理分辨率与峰值刷新率。"""
+        width, height = 0, 0
+        try:
+            out = self.shell(serial, "wm", "size")
+            match = re.search(r"(?:Physical|Override) size:\s*(\d+)x(\d+)", out)
+            if match:
+                width, height = int(match.group(1)), int(match.group(2))
+        except AdbError:
+            pass
+
+        refresh_rate = 0.0
+        try:
+            out = self.shell(serial, "settings", "get", "system", "peak_refresh_rate")
+            value = out.strip()
+            if value and value != "null":
+                refresh_rate = float(value)
+        except (AdbError, ValueError):
+            pass
+
+        if refresh_rate <= 0:
+            # 回退：从 dumpsys display 的显示模式里取最大刷新率
+            try:
+                out = self.shell(serial, "dumpsys", "display", timeout=20.0)
+                rates = [float(x) for x in re.findall(r"peakRefreshRate=(\d+\.?\d*)", out)]
+                if rates:
+                    refresh_rate = max(rates)
+            except (AdbError, ValueError):
+                pass
+
+        return DisplayInfo(width=width, height=height, refresh_rate=refresh_rate)

@@ -260,7 +260,11 @@ class ScrcpyControlWriter:
         with self._lock:
             if self._closed:
                 raise RuntimeError("控制通道已关闭")
-            self._sock.sendall(payload)
+            try:
+                self._sock.sendall(payload)
+            except OSError as exc:
+                self._closed = True
+                raise RuntimeError(f"控制通道写入失败: {exc}") from exc
 
     # ---- 便捷方法 -------------------------------------------------
     def inject_keycode(

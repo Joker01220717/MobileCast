@@ -20,6 +20,10 @@ BUTTON_MIDDLE = 0x4
 POINTER_ID_MOUSE = 0xFFFFFFFFFFFFFFFF
 POINTER_ID_GENERIC_FINGER = 0xFFFFFFFFFFFFFFFE
 
+# 常用 Android keycode（通道无关的语义常量，完整表见 docs/scrcpy-protocol.md）
+KEYCODE_HOME = 3
+KEYCODE_BACK = 4
+
 
 class Platform(IntEnum):
     ANDROID = 1

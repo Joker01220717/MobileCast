@@ -7,7 +7,7 @@
     adb forward tcp:<control_port> localabstract:scrcpy_<scid>_control
     adb shell CLASSPATH=/data/local/tmp/scrcpy-server.jar \
         app_process / com.genymobile.scrcpy.Server <version> tunnel_forward=true ...
-    客户端连接 127.0.0.1:<video_port>   → 读 64B 设备名 → 原始视频流
+    客户端连接 127.0.0.1:<video_port>   → 视频流（首部 64B 设备名由会话层读取）
     客户端连接 127.0.0.1:<control_port> → 控制通道
 
 `scrcpy-server.jar` 不随本仓库分发（GPL-3.0），请从 scrcpy 官方发布页下载后
@@ -25,14 +25,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adb import Adb, AdbError
-from .scrcpy_video import read_device_meta
 
 log = logging.getLogger(__name__)
 
 DEFAULT_SERVER_VERSION = "3.0"
 SERVER_REMOTE_PATH = "/data/local/tmp/scrcpy-server.jar"
 
-__all__ = ["ScrcpyError", "ScrcpyOptions", "ScrcpyServer"]
+__all__ = ["ScrcpyError", "ScrcpyOptions", "ScrcpyServer", "find_server_jar"]
 
 
 class ScrcpyError(RuntimeError):
@@ -76,6 +75,39 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def find_server_jar() -> Path:
+    """定位 scrcpy-server jar。查找顺序：
+
+    1. 环境变量 ``MOBILECAST_SCRCPY_SERVER``
+    2. 仓库根目录 ``third_party/scrcpy-server*.jar``
+    3. 包目录 ``data/scrcpy-server*.jar``（打包发布时随包附带）
+
+    找不到时抛 :class:`ScrcpyError` 并给出下载指引。
+    """
+    import os
+
+    env_path = os.environ.get("MOBILECAST_SCRCPY_SERVER")
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            return path
+
+    search_dirs = [
+        Path(__file__).resolve().parents[4] / "third_party",  # <repo>/third_party
+        Path(__file__).resolve().parents[2] / "data",  # <package>/data
+    ]
+    for directory in search_dirs:
+        if directory.is_dir():
+            matches = sorted(directory.glob("scrcpy-server*.jar"))
+            if matches:
+                return matches[-1]
+
+    raise ScrcpyError(
+        "未找到 scrcpy-server.jar。请从 https://github.com/Genymobile/scrcpy/releases "
+        "下载后放入 third_party/ 目录，或设置环境变量 MOBILECAST_SCRCPY_SERVER 指向它。"
+    )
 
 
 class ScrcpyServer:
@@ -133,10 +165,8 @@ class ScrcpyServer:
 
         try:
             self._video_socket = self._connect("127.0.0.1", self._video_port, connect_timeout)
-            device_name = read_device_meta(self._video_socket)
-            log.info("设备 %s 已连接（video），设备名: %s", self._serial, device_name)
-
             self._control_socket = self._connect("127.0.0.1", self._control_port, connect_timeout)
+            log.info("scrcpy-server 隧道已建立: %s (scid=%s)", self._serial, self._scid)
         except OSError as exc:
             self.stop()
             raise ScrcpyError(f"连接 scrcpy-server 失败: {exc}") from exc

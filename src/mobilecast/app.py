@@ -32,8 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
 
     if args.serial:
-        # TODO(Phase 1): 直接建立会话
-        window.statusBar().showMessage(f"--serial {args.serial} 将在 Phase 1 支持自动连接")
+        window.connect_serial(args.serial)
 
     return app.exec()
 

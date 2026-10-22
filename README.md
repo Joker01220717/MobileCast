@@ -17,7 +17,7 @@
 
 | 平台 | 投屏 | 触控 | 键盘 | 剪贴板 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| Android 5.0+（API 21+） | ✅ | ✅ | ✅ | 🔲 | 开发中 |
+| Android 5.0+（API 21+） | ✅ | ✅ | ✅ | 🔲 | 待真机验证 |
 | iPhone / iPad（iOS 13+） | 🔲 | 🔲 | 🔲 | 🔲 | 规划中 |
 
 ## 快速开始
@@ -28,6 +28,9 @@
 - Python 3.11+
 - Android SDK platform-tools（`adb`）已加入 `PATH`
 - Android 设备已开启「开发者选项 → USB 调试」
+- `scrcpy-server-*.jar`（GPL-3.0，不随仓库分发）：
+  从 [scrcpy releases](https://github.com/Genymobile/scrcpy/releases) 下载后放入 `third_party/`
+  目录，或用环境变量 `MOBILECAST_SCRCPY_SERVER` 指向它的路径
 
 ### 安装与运行
 
@@ -39,6 +42,23 @@ python -m venv .venv
 pip install -e ".[ui,video]"
 python -m mobilecast
 ```
+
+连接设备后点击「连接」即可投屏；也可以直接指定设备：
+
+```powershell
+python -m mobilecast --serial <设备序列号>
+```
+
+### 使用说明
+
+| 操作 | 效果 |
+| --- | --- |
+| 鼠标左键点击 / 拖动 | 触摸 / 滑动 |
+| 鼠标滚轮 | 页面滚动 |
+| 鼠标右键 | 返回键 |
+| 鼠标中键 | Home 键 |
+| 键盘打字（含中文输入法） | 文本输入 |
+| 方向键 / Enter / Backspace 等 | 对应 Android 按键 |
 
 ### 运行测试
 
@@ -80,17 +100,18 @@ MobileCast/
 │   ├── app.py                 程序入口
 │   ├── core/                  与 UI 无关的核心逻辑
 │   │   ├── device.py          设备 / 会话 / 输入事件抽象
-│   │   ├── android/           adb、scrcpy-server 推流与控制协议
+│   │   ├── video/             解码层（PyAV，可替换硬解）
+│   │   ├── android/           adb、scrcpy-server、控制协议与会话
 │   │   └── ios/               WebDriverAgent 客户端
-│   └── ui/                    PySide6 界面
-├── tests/                     单元测试（协议编解码等）
+│   └── ui/                    PySide6 界面（渲染 + 键鼠捕获 + 会话接线）
+├── tests/                     单元测试（协议编解码、会话、解码链路）
 └── .github/workflows/ci.yml   CI（ruff + pytest）
 ```
 
 ## 开发路线
 
 - [x] **Phase 0** — 仓库、工程骨架、协议编解码与单测
-- [ ] **Phase 1** — Android：USB 投屏窗口 + 鼠标触摸 + 键盘输入
+- [x] **Phase 1** — Android：USB 投屏窗口 + 鼠标触摸 + 键盘输入（代码已完成，待真机验证）
 - [ ] **Phase 2** — Android：无线连接、剪贴板同步、文件拖拽、多设备会话管理
 - [ ] **Phase 3** — iOS：usbmuxd 发现设备 + WebDriverAgent 视频流与触控
 - [ ] **Phase 4** — 打包发布（PyInstaller 单文件安装包）、快捷键自定义、录制

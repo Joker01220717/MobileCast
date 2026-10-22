@@ -8,13 +8,21 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QWheelEvent
+from PySide6.QtGui import (
+    QImage,
+    QInputMethodEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QWidget
 
 from ..core.device import (
-    BUTTON_MIDDLE,
     BUTTON_PRIMARY,
-    BUTTON_SECONDARY,
+    KEYCODE_BACK,
+    KEYCODE_HOME,
     POINTER_ID_MOUSE,
     KeyAction,
     KeyEvent,
@@ -22,6 +30,7 @@ from ..core.device import (
     TextEvent,
     TouchAction,
     TouchEvent,
+    VideoFrame,
 )
 
 # Qt key → Android keycode（常用功能键）
@@ -44,11 +53,9 @@ QT_TO_ANDROID_KEYCODE: dict[int, int] = {
     Qt.Key.Key_VolumeDown: 25,
 }
 
-# Qt 鼠标键 → AMOTION_EVENT_BUTTON_*
+# Qt 鼠标键 → AMOTION_EVENT_BUTTON_*（右键/中键另有语义，见 mousePressEvent）
 QT_TO_ANDROID_BUTTON = {
     Qt.MouseButton.LeftButton: BUTTON_PRIMARY,
-    Qt.MouseButton.RightButton: BUTTON_SECONDARY,
-    Qt.MouseButton.MiddleButton: BUTTON_MIDDLE,
 }
 
 
@@ -68,6 +75,7 @@ class MirrorView(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(240, 320)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
 
     # ---- 画面 ----------------------------------------------------
     def set_frame(self, image: QImage, device_size: QSize | None = None) -> None:
@@ -75,6 +83,17 @@ class MirrorView(QWidget):
         if device_size is not None and device_size.isValid():
             self._device_size = device_size
         self.update()
+
+    def set_rgb_frame(self, frame: VideoFrame) -> None:
+        """直接渲染 RGB24 帧（来自会话层）。"""
+        image = QImage(
+            frame.data,
+            frame.width,
+            frame.height,
+            frame.width * 3,
+            QImage.Format.Format_RGB888,
+        ).copy()  # copy 与 Python bytes 缓冲解耦
+        self.set_frame(image, QSize(frame.width, frame.height))
 
     def _target_rect(self):
         """letterbox 后画面在控件中的位置与尺寸。"""
@@ -135,13 +154,28 @@ class MirrorView(QWidget):
         )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self._emit_touch(TouchAction.DOWN, event)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        button = event.button()
+        if button == Qt.MouseButton.RightButton:
+            # scrcpy 惯例：右键 = 返回键
+            self.key_event.emit(KeyEvent(action=KeyAction.DOWN, keycode=KEYCODE_BACK))
+        elif button == Qt.MouseButton.MiddleButton:
+            # 中键 = Home 键
+            self.key_event.emit(KeyEvent(action=KeyAction.DOWN, keycode=KEYCODE_HOME))
+        else:
+            self._emit_touch(TouchAction.DOWN, event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._emit_touch(TouchAction.MOVE, event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self._emit_touch(TouchAction.UP, event)
+        button = event.button()
+        if button == Qt.MouseButton.RightButton:
+            self.key_event.emit(KeyEvent(action=KeyAction.UP, keycode=KEYCODE_BACK))
+        elif button == Qt.MouseButton.MiddleButton:
+            self.key_event.emit(KeyEvent(action=KeyAction.UP, keycode=KEYCODE_HOME))
+        else:
+            self._emit_touch(TouchAction.UP, event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         point = self.widget_to_device(event.position().toPoint())
@@ -165,6 +199,12 @@ class MirrorView(QWidget):
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         self._handle_key(KeyAction.UP, event)
+
+    def inputMethodEvent(self, event: QInputMethodEvent) -> None:  # noqa: N802
+        """输入法（中文 / emoji）提交的文本走这里。"""
+        if event.commitString():
+            self.text_event.emit(TextEvent(text=event.commitString()))
+        super().inputMethodEvent(event)
 
     def _handle_key(self, action: KeyAction, event: QKeyEvent) -> None:
         if action is KeyAction.DOWN:

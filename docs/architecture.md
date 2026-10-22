@@ -33,11 +33,13 @@
 
 | 执行单元 | 职责 | 说明 |
 | --- | --- | --- |
-| UI 主线程（Qt） | 渲染、键鼠事件捕获 | 只做轻量工作，绝不阻塞 |
-| 视频读取线程 | 从视频 socket 读字节流 → 切 NAL → 喂解码器 | 每个会话一条 |
-| 解码线程 | 解码 H.264/H.265/AV1 → `VideoFrame` | 与读取可合并（低负载时） |
-| 控制写入线程 | 序列化 `InputEvent` → 写控制 socket | 单独队列 + 定长写入 |
+| UI 主线程（Qt） | 渲染、键鼠事件捕获、输入注入写入 | 只做轻量工作，绝不阻塞 |
+| 视频线程（每会话一条） | 读视频 socket → 切 NAL → 解码 → 最新帧槽位 | 读取与解码同线程，负载高时可拆分 |
+| FramePump（QThread） | 从帧槽位拉帧 → 信号转发给 UI 渲染 | 跨线程走 Qt 信号队列 |
 | adb 子进程 | `adb` / `scrcpy-server` 均为子进程 | 统一由 `Adb` 类管理，退出时清理 |
+
+控制 socket 的写入由 UI 线程直接完成（`ScrcpyControlWriter` 内部加锁），
+单条消息只有几十字节，同步写入的开销可忽略。
 
 帧传递使用**单槽最新帧队列**（`queue.Queue(maxsize=1)` + 丢旧帧），
 渲染永远追最新画面，保证低延迟而不是高流畅度。
@@ -64,8 +66,9 @@ UI: 连接(serial)
 Qt mouseMoveEvent(x, y)
  └─ MirrorView.widget_to_device()      # letterbox 坐标映射
  └─ TouchEvent(action=MOVE, x, y, screen_w, screen_h)
+ └─ MainWindow._send_input() → AndroidSession.send_touch()
  └─ scrcpy_control.encode_inject_touch()   # 32 字节大端消息
- └─ 控制写入线程 → socket
+ └─ ScrcpyControlWriter → 控制 socket
 ```
 
 坐标映射规则：视频按比例缩放并居中（letterbox），窗口留黑边部分直接忽略；

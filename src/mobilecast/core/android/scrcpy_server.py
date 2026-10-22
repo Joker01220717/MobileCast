@@ -315,7 +315,9 @@ class ScrcpyServer:
         last_error: OSError | None = None
         while time.monotonic() < deadline:
             try:
-                return socket.create_connection((host, port), timeout=timeout)
+                sock = socket.create_connection((host, port), timeout=timeout)
+                sock.settimeout(None)  # 超时只用于建连；之后阻塞读
+                return sock
             except OSError as exc:  # noqa: PERF203
                 last_error = exc
                 time.sleep(0.1)
@@ -341,6 +343,8 @@ class ScrcpyServer:
             except OSError:
                 first_byte = b""
             if first_byte:
+                # 之后是长驻流：切回阻塞模式，否则静态画面（无新帧）会读超时断线
+                sock.settimeout(None)
                 return sock  # dummy byte 已被消费，后续即为设备元信息
             sock.close()
             time.sleep(0.1)

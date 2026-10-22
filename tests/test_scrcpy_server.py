@@ -73,3 +73,56 @@ def test_estimate_bit_rate_scales_and_clamps():
     assert estimate_bit_rate(1920, 1080, 60) == 7_464_960
     assert estimate_bit_rate(10, 10, 1) == 2_000_000  # 下限
     assert estimate_bit_rate(8000, 8000, 240) == 30_000_000  # 上限
+
+
+def _free_local_listener():
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    return listener, listener.getsockname()[1]
+
+
+def test_connect_socket_has_no_read_timeout():
+    """回归测试：静态画面时设备可能长时间不发帧，socket 读不能带超时（否则误判断线）。"""
+    import threading
+
+    listener, port = _free_local_listener()
+    accepted = []
+
+    def accept():
+        conn, _ = listener.accept()
+        accepted.append(conn)
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+
+    sock = ScrcpyServer._connect("127.0.0.1", port, 5.0)
+    thread.join(3)
+    assert sock.gettimeout() is None
+
+    sock.close()
+    accepted[0].close()
+    listener.close()
+
+
+def test_connect_alive_consumes_dummy_byte_and_disables_timeout():
+    import threading
+
+    listener, port = _free_local_listener()
+
+    def serve():
+        conn, _ = listener.accept()
+        conn.sendall(b"\x00")  # dummy byte
+        conn.sendall(b"payload")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    sock = ScrcpyServer._connect_alive("127.0.0.1", port, 5.0)
+    assert sock.gettimeout() is None
+    assert sock.recv(7) == b"payload"  # dummy byte 已被消费
+
+    sock.close()
+    listener.close()

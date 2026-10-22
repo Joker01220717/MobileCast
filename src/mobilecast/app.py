@@ -11,12 +11,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mobilecast", description="移动设备投屏与控制")
     parser.add_argument("--debug", action="store_true", help="输出调试日志")
     parser.add_argument("--serial", help="启动后自动连接指定设备序列号")
+    parser.add_argument("--doctor", action="store_true", help="环境自检（排查问题先跑这个）")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if args.doctor:
+        from .doctor import run_doctor
+
+        return run_doctor()
 
     try:
         from PySide6.QtWidgets import QApplication

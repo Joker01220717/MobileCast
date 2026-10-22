@@ -1,47 +1,72 @@
 # scrcpy 协议笔记（客户端视角）
 
 本文记录 MobileCast 需要用到的 scrcpy 推流与控制协议细节。
-**对齐版本：scrcpy 3.x（master，2026-10 校对）**；升级 scrcpy 时请重新核对上游
-`app/src/control_msg.c`、`app/src/server.h`、`app/src/util/binary.h`。
+**对齐版本：scrcpy v5.0.1（2026-10 真机校对）**；升级 scrcpy 时请重新核对上游：
+
+- `app/src/control_msg.c`、`app/src/device_msg.c`、`app/src/util/binary.h`
+- `server/src/main/java/com/genymobile/scrcpy/Options.java`（启动参数）
+- `server/src/main/java/com/genymobile/scrcpy/device/DesktopConnection.java`（连接与元信息）
+- `server/src/main/java/com/genymobile/scrcpy/device/Streamer.java`（帧封装）
 
 ## 1. 会话建立
 
 ```
-1. adb push scrcpy-server-<ver>.jar /data/local/tmp/scrcpy-server.jar
-2. 生成 scid（8 位十六进制），socket 名：
-     video   : scrcpy_<scid>
-     control : scrcpy_<scid>_control
-3. adb forward tcp:<video_port>   localabstract:scrcpy_<scid>
-   adb forward tcp:<control_port> localabstract:scrcpy_<scid>_control
+1. adb push scrcpy-server-v<X.Y.Z> /data/local/tmp/scrcpy-server.jar
+2. 生成 scid（8 位十六进制、31 位非负），socket 名：scrcpy_<scid>
+3. adb forward tcp:<port> localabstract:scrcpy_<scid>     ← 只需一条转发
 4. 启动 server（adb shell）：
    CLASSPATH=/data/local/tmp/scrcpy-server.jar \
-     app_process / com.genymobile.scrcpy.Server <version> \
+     app_process / com.genymobile.scrcpy.Server <X.Y.Z> scid=<scid> \
        tunnel_forward=true control=true audio=false cleanup=true \
        video_codec=h264 max_size=1280 video_bit_rate=8000000
-5. 连接 127.0.0.1:<video_port>   → 设备元信息 + 原始视频流
-   连接 127.0.0.1:<control_port> → 控制通道
+5. 连接 127.0.0.1:<port>（第一条）→ 视频通道
+   连接 127.0.0.1:<port>（第二条）→ 控制通道
 ```
 
-要点：
+要点（都是踩过的坑）：
 
-- `tunnel_forward=true` 表示走 `adb forward`（客户端连本地端口）；
-  否则 server 会主动反向连接客户端。
-- server 由 `app_process` 以 shell 权限运行；会话结束（socket 断开）后
-  server 自行退出，`cleanup=true` 保证移除临时文件。
+- **第一个参数是版本号**，必须与 server 的 `BuildConfig.VERSION_NAME` 完全一致
+  （如 v5.0.1 传 `5.0.1`），否则 server 启动即退出。
+- **scid 必须 < 0x80000000**：server 用 `Integer.parseInt(value, 16)` 有符号解析，
+  超过 31 位会抛 `NumberFormatException`。
+- **v5.x 用同一个 socket 名按序 accept**：第一条连接是视频，第二条是控制
+  （audio=false 时）。这是 2.x `scrcpy_<scid>_control` 独立 socket 名的老格式，已废弃。
+  顺序颠倒会把控制连接当成视频连接。
+- **dummy byte**：server accept 视频连接后先发 1 个字节，客户端读到它才算真正连上。
+  `adb forward` 会先接受本地 TCP 连接、之后才去连设备端 socket，server 未就绪时
+  会得到「假连接」（connect 成功但立即 EOF）——必须用这 1 字节校验并重试。
+- `cleanup=true` 时 server 退出会删除 jar 文件；连续快速重启时旧会话的 CleanUp
+  可能删掉刚推送的新 jar，需要清理残留进程 + 启动重试。
+- server 由 `app_process` 以 shell 权限运行；连接断开后自行退出。
 
-## 2. 视频流格式
+## 2. 视频流格式（v5.x 成帧）
 
-连接建立后，server 首先发送**设备元信息**：
+视频通道字节流布局：
 
-| 偏移 | 长度 | 内容 |
-| --- | --- | --- |
-| 0 | 64 | 设备名（UTF-8，NUL 填充，`SC_DEVICE_NAME_FIELD_LENGTH = 64`） |
+```
+[dummy byte 1B]                  send_dummy_byte=true 时（仅首条连接）
+[设备名 64B]                     send_device_meta=true 时（NUL 填充）
+[codec id u32]                   send_stream_meta=true 时
+重复：
+    [帧头 12B: ptsAndFlags u64 + size u32]   send_frame_meta=true 时
+    [包体 size 字节]（MediaCodec 输出，通常含 1..n 个 Annex-B NAL）
+```
 
-随后是**原始 Annex-B H.264/H.265 字节流**（没有包头、没有长度前缀），
-解码器直接喂入即可；NAL 边界由 start code（`00 00 00 01` / `00 00 01`）划分。
-视频宽高由 SPS/PPS 决定，解码后从解码器读取。
+帧头 `ptsAndFlags` 的高位标志：
 
-> 注意：scrcpy 1.x 的「4B PTS + 4B 长度」分包格式已废弃，不要混用。
+| 位 | 含义 |
+| --- | --- |
+| bit63 | `PACKET_FLAG_SESSION`：这 12B 其实是 session meta（`flags:u32 width:u32 height:u32`，bit0 = 客户端触发的 resize） |
+| bit62 | `PACKET_FLAG_CONFIG`：包体是编解码配置（CSD，如 SPS/PPS），此时 pts 无效 |
+| bit61 | `PACKET_FLAG_KEY_FRAME`：关键帧 |
+
+`codec id` 是 FourCC：H.264 = `0x68323634`（"h264"）。真机实测值一致。
+
+session meta 会随旋转 / 分辨率变化重新发送，可用来更新窗口尺寸。
+
+> 历史格式备忘：scrcpy 2.x 是「64B 设备名 + 裸 Annex-B 流（无帧头）」。
+> 若服务端传 `raw_stream=true` 可退回裸流（同时关闭全部元信息），
+> 此时需自行按 start code 切 NAL（见 `scrcpy_video.AnnexBSplitter`）。
 
 ## 3. 控制消息（客户端 → 设备）
 

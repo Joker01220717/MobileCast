@@ -52,6 +52,9 @@ def find_adb() -> str:
         root = os.environ.get(var)
         if root:
             candidates.append(Path(root) / "platform-tools" / exe)
+    # 仓库内 / 包内自带的 platform-tools（third_party/platform-tools）
+    candidates.append(Path(__file__).resolve().parents[4] / "third_party" / "platform-tools" / exe)
+    candidates.append(Path(__file__).resolve().parents[2] / "data" / "platform-tools" / exe)
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA", "")
         if local:

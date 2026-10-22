@@ -49,13 +49,18 @@ from .scrcpy_control import (
     encode_set_clipboard,
 )
 from .scrcpy_server import ScrcpyOptions, ScrcpyServer
-from .scrcpy_video import AnnexBSplitter, read_device_meta
+from .scrcpy_video import (
+    SessionMeta,
+    VideoPacket,
+    VideoStreamError,
+    read_device_meta,
+    read_frame,
+    read_stream_meta,
+)
 
 log = logging.getLogger(__name__)
 
 __all__ = ["AndroidSession"]
-
-_READ_CHUNK = 65536
 
 
 class AndroidSession(DeviceSession):
@@ -89,15 +94,25 @@ class AndroidSession(DeviceSession):
         self._thread: threading.Thread | None = None
         self._control_thread: threading.Thread | None = None
         self._clipboard_seq = 0
+        self._codec_id: int | None = None
+        self._width = 0
+        self._height = 0
 
-        # 设备 → PC 的事件回调（由控制通道线程调用，UI 层需自行切线程）
+        # 设备 → PC 的事件回调（由线程回调，UI 层需自行切线程）
         self.on_clipboard: Callable[[str], None] | None = None
         self.on_clipboard_ack: Callable[[int], None] | None = None
+        self.on_video_size: Callable[[int, int], None] | None = None
 
     # ---- 属性 ----------------------------------------------------
     @property
     def info(self) -> DeviceInfo:
-        return DeviceInfo(serial=self._serial, name=self._name, platform=Platform.ANDROID)
+        return DeviceInfo(
+            serial=self._serial,
+            name=self._name,
+            platform=Platform.ANDROID,
+            width=self._width,
+            height=self._height,
+        )
 
     @property
     def state(self) -> SessionState:
@@ -106,6 +121,11 @@ class AndroidSession(DeviceSession):
     @property
     def serial(self) -> str:
         return self._serial
+
+    @property
+    def codec_id(self) -> int | None:
+        """流元信息中的 codec id（来自 scrcpy 的 VideoCodec.getId()）。"""
+        return self._codec_id
 
     # ---- 生命周期 -------------------------------------------------
     def start(self) -> None:
@@ -135,6 +155,7 @@ class AndroidSession(DeviceSession):
         self._writer = ScrcpyControlWriter(control_socket)
 
         self._name = read_device_meta(video_socket) or self._name
+        self._codec_id = read_stream_meta(video_socket)
         if self._decoder is None:
             self._decoder = create_decoder(self._options.video_codec)
 
@@ -188,32 +209,37 @@ class AndroidSession(DeviceSession):
             yield frame
 
     def _video_loop(self) -> None:
-        splitter = AnnexBSplitter()
         try:
             while not self._stop_event.is_set():
-                chunk = self._video_socket.recv(_READ_CHUNK)
-                if not chunk:
-                    log.info("视频流结束: %s", self._serial)
-                    break
-                for nal in splitter.feed(chunk):
-                    self._decode_and_store(nal)
-            tail = splitter.flush()
-            if tail is not None:
-                self._decode_and_store(tail)
-            assert self._decoder is not None
-            for frame in self._decoder.flush():
-                self._store_frame(frame)
-        except OSError as exc:
+                packet = read_frame(self._video_socket)
+                if isinstance(packet, SessionMeta):
+                    self._handle_session_meta(packet)
+                    continue
+                self._decode_and_store(packet)
+        except (OSError, VideoStreamError) as exc:
             if not self._stop_event.is_set():
-                log.warning("视频读取异常（%s）: %s", self._serial, exc)
+                log.warning("视频读取结束（%s）: %s", self._serial, exc)
         finally:
+            # 无论正常结束还是异常，都要排空解码器缓冲
+            try:
+                assert self._decoder is not None
+                for frame in self._decoder.flush():
+                    self._store_frame(frame)
+            except Exception:  # noqa: BLE001
+                log.exception("解码器 flush 失败（%s）", self._serial)
             if self._state is SessionState.CONNECTED:
                 self._state = SessionState.LOST
             self._ended.set()
 
-    def _decode_and_store(self, nal: bytes) -> None:
+    def _handle_session_meta(self, meta: SessionMeta) -> None:
+        self._width, self._height = meta.width, meta.height
+        log.info("会话画面尺寸（%s）: %dx%d", self._serial, meta.width, meta.height)
+        if self.on_video_size is not None:
+            self.on_video_size(meta.width, meta.height)
+
+    def _decode_and_store(self, packet: VideoPacket) -> None:
         assert self._decoder is not None
-        for frame in self._decoder.decode(nal):
+        for frame in self._decoder.decode(packet.data):
             self._store_frame(frame)
 
     def _store_frame(self, frame: VideoFrame) -> None:

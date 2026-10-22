@@ -88,19 +88,33 @@ def test_decoder_flush_drains_buffered_frames():
 
 
 def test_session_pipeline_with_real_h264_stream():
-    """端到端：socketpair 注入真实 H.264 流 → AndroidSession → 解码帧。"""
+    """端到端：socketpair 注入真实 H.264 流（v5 成帧）→ AndroidSession → 解码帧。"""
     import socket
+    import struct
     import threading
 
     from mobilecast.core.android.session import AndroidSession
+
+    def packet(data: bytes, config: bool = False) -> bytes:
+        flags = 1 << 62 if config else 0
+        return struct.pack(">QI", flags, len(data)) + data
+
+    stream = _make_low_latency_h264(4)
+    splitter = AnnexBSplitter()
+    nals = splitter.feed(stream)
+    tail = splitter.flush()
+    if tail is not None:
+        nals.append(tail)
 
     video_dev, video_peer = socket.socketpair()
     ctrl_dev, ctrl_peer = socket.socketpair()
     session = AndroidSession(
         adb=None, serial="TEST-SERIAL", decoder=PyAvDecoder("h264"), name="Pipeline"
     )
-    stream = _make_low_latency_h264(4)
-    video_peer.sendall(b"Pipeline".ljust(64, b"\x00") + stream)
+    # 设备名 64B + codec id 4B + 每个 NAL 一包
+    video_peer.sendall(b"Pipeline".ljust(64, b"\x00") + struct.pack(">I", 0))
+    for index, nal in enumerate(nals):
+        video_peer.sendall(packet(nal, config=index < 2))
     session.attach_sockets(video_dev, ctrl_dev)
 
     result: list = []

@@ -19,7 +19,7 @@
 
 | 平台 | 投屏 | 触控 | 键盘 | 剪贴板 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| Android 5.0+（API 21+） | ✅ | ✅ | ✅ | ✅ | 待真机验证 |
+| Android 5.0+（API 21+） | ✅ | ✅ | ✅ | ✅ | 链路已真机验证 |
 | iPhone / iPad（iOS 13+） | 🔲 | 🔲 | 🔲 | 🔲 | 规划中 |
 
 ## 快速开始
@@ -76,6 +76,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### 出问题先自检
+
+```powershell
+python -m mobilecast --doctor
+```
+
+检查 Python 依赖、adb、scrcpy-server 与设备连接状态；
+手动验证清单见 [docs/validation.md](docs/validation.md)。
+
 ## 架构
 
 ```
@@ -121,7 +130,9 @@ MobileCast/
 
 - [x] **Phase 0** — 仓库、工程骨架、协议编解码与单测
 - [x] **Phase 1** — Android：USB 投屏窗口 + 鼠标触摸 + 键盘输入
-- [x] **Phase 2** — Android：多设备多窗口、无线连接、剪贴板同步、文件拖拽（待真机验证）
+- [x] **Phase 2** — Android：多设备多窗口、无线连接、剪贴板同步、文件拖拽
+- [x] **真机验证（链路）** — Xiaomi Android 16 / Redmi Android 9 实测通过（[记录](docs/validation.md)）
+- [ ] **真机验证（GUI）** — 手动清单验证中，见 [docs/validation.md](docs/validation.md)
 - [ ] **Phase 3** — iOS：usbmuxd 发现设备 + WebDriverAgent 视频流与触控
 - [ ] **Phase 4** — 打包发布（PyInstaller 单文件安装包）、快捷键自定义、录制
 

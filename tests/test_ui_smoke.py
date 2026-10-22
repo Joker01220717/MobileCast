@@ -104,6 +104,38 @@ def test_main_window_constructs_offscreen(app):
     window.close()
 
 
+class FakeAdbStub:
+    """离线设备预检查测试用：只实现 devices()。"""
+
+    def __init__(self, devices) -> None:
+        self._devices = devices
+
+    def devices(self):
+        return self._devices
+
+
+def test_connect_serial_offline_device_gives_friendly_warning(app, monkeypatch):
+    """设备离线时应提示可操作的检查项，而不是底层 adb 报错。"""
+    from mobilecast.core.android.adb import AdbDevice
+    from mobilecast.ui import main_window as mw_module
+
+    warnings: list = []
+    monkeypatch.setattr(
+        mw_module.QMessageBox,
+        "warning",
+        staticmethod(lambda *args, **kwargs: warnings.append(args)),
+    )
+
+    offline = AdbDevice(serial="OFFLINE-1", state="offline")
+    window = mw_module.MainWindow(adb=FakeAdbStub([offline]))
+    window.connect_serial("OFFLINE-1")
+
+    assert len(warnings) == 1
+    assert warnings[0][1] == "设备不可用"
+    assert "USB 调试" in warnings[0][2]
+    window.close()
+
+
 class FakeSessionStub:
     """MirrorWindow 依赖的最小会话接口。"""
 

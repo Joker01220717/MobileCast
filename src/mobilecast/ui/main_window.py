@@ -133,6 +133,29 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(exc))
             return
 
+        # 设备状态预检查：给出可操作的提示，而不是底层 adb 报错
+        try:
+            known = {d.serial: d for d in adb.devices()}
+        except AdbError as exc:
+            self.statusBar().showMessage(f"枚举设备失败: {exc}")
+            return
+        device = known.get(serial)
+        if device is None:
+            self.statusBar().showMessage(f"设备 {serial} 已不在列表中，请点「刷新设备」后重试")
+            return
+        if not device.ready:
+            QMessageBox.warning(
+                self,
+                "设备不可用",
+                f"设备 {serial} 当前状态：{device.state}\n\n"
+                "请检查：\n"
+                "· USB 线是否插好（无线设备请确认同一 Wi-Fi）\n"
+                "· 手机屏幕是否已解锁\n"
+                "· 「开发者选项 → USB 调试」是否开启\n\n"
+                "处理后点「刷新设备」重试。",
+            )
+            return
+
         # 屏幕参数：决定默认画质（原始分辨率 + 峰值刷新率）并显示在状态栏
         display_info = None
         try:

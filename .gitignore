@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
+
+# 第三方二进制产物（不入库，由脚本下载）
+third_party/scrcpy-server*.jar
+third_party/platform-tools/
+third_party/*.exe
+third_party/*.dll
+
+# 运行期产物
+*.mp4
+*.h264
+recordings/

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobilecast"
+version = "0.1.0"
+description = "在 Windows 上把 Android / iOS 设备投屏到桌面窗口，并用鼠标键盘操控"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Joker01220717" }]
+keywords = ["scrcpy", "mirror", "android", "ios", "remote-control", "screencast"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: System :: Emulators",
+]
+
+# 核心层只用标准库，保证协议编解码可在任意环境测试
+dependencies = []
+
+[project.optional-dependencies]
+ui = ["PySide6>=6.7"]
+video = ["av>=12.0"]
+ios = ["pymobiledevice3>=2.0"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+mobilecast = "mobilecast.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -79,7 +79,22 @@
 - `action_button` 表示触发本次事件的鼠标键，`buttons` 表示当前按住的键集
   （`AMOTION_EVENT_BUTTON_*`，主键 = `0x1`）。
 
-## 4. 常用 Android keycode
+## 4. 设备 → 客户端消息
+
+控制通道是双向的。设备端会主动推送下列消息（大端序），
+解析实现对应上游 ``device_msg.c`` 的 ``sc_device_msg_deserialize()``：
+
+| type | 消息 | 布局 | 总长 | 用途 |
+| --- | --- | --- | --- | --- |
+| 0 | CLIPBOARD | `len:u32 + utf8 text` | 5+len | 设备剪贴板变化时推送 |
+| 1 | ACK_CLIPBOARD | `sequence:u64` | 9 | 确认 SET_CLIPBOARD 已生效 |
+| 2 | UHID_OUTPUT | `id:u16 size:u16 + data` | 5+size | 虚拟 HID 外设回传（如键盘 LED） |
+
+未知类型视为协议错误（无法恢复），应重连会话。
+本项目据此实现剪贴板双向同步：设备复制 → `CLIPBOARD` → 写入 Windows 剪贴板；
+PC 复制 → `SET_CLIPBOARD`（见上文）→ 设备。
+
+## 5. 常用 Android keycode
 
 | 键 | keycode |
 | --- | --- |
@@ -94,7 +109,7 @@
 
 完整列表见 AOSP `KeyEvent.java`（`KEYCODE_*`）。
 
-## 5. 参考
+## 6. 参考
 
 - scrcpy 源码：https://github.com/Genymobile/scrcpy
   - `app/src/control_msg.c` — 控制消息序列化（本文表格来源）

@@ -75,3 +75,40 @@ def test_find_adb_without_platform_tools(monkeypatch):
     monkeypatch.setattr(adb_mod.Path, "exists", lambda self: False)
     with pytest.raises(AdbError, match="未找到 adb"):
         adb_mod.find_adb()
+
+
+def test_tcpip_and_connect_args(fake_run):
+    calls = fake_run(stdout=b"restarting in TCP mode port: 5555\n")
+    client = Adb(adb_path="adb")
+    assert "5555" in client.tcpip("serial-1", 5555)
+    assert calls[0][1:] == ["-s", "serial-1", "tcpip", "5555"]
+
+
+def test_connect_address(fake_run):
+    calls = fake_run(stdout=b"connected to 192.168.1.8:5555\n")
+    client = Adb(adb_path="adb")
+    assert "connected" in client.connect("192.168.1.8:5555")
+    assert calls[0][1:] == ["connect", "192.168.1.8:5555"]
+
+
+def test_device_ip_from_addr_show(monkeypatch):
+    client = Adb(adb_path="adb")
+    outputs = ["3: wlan0: <BROADCAST,MULTICAST> inet 192.168.1.8/24 scope global wlan0\n"]
+    monkeypatch.setattr(client, "shell", lambda *a, **k: outputs.pop(0))
+    assert client.device_ip("serial-1") == "192.168.1.8"
+
+
+def test_device_ip_falls_back_to_ip_route(monkeypatch):
+    client = Adb(adb_path="adb")
+    outputs = [
+        "3: wlan0: <BROADCAST,MULTICAST,UP>\n",
+        "192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.99\n",
+    ]
+    monkeypatch.setattr(client, "shell", lambda *a, **k: outputs.pop(0))
+    assert client.device_ip("serial-1") == "192.168.1.99"
+
+
+def test_device_ip_returns_none_when_unavailable(monkeypatch):
+    client = Adb(adb_path="adb")
+    monkeypatch.setattr(client, "shell", lambda *a, **k: "")
+    assert client.device_ip("serial-1") is None

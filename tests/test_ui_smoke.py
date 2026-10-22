@@ -15,7 +15,9 @@ from PySide6.QtTest import QTest  # noqa: E402
 
 from mobilecast.core.device import (  # noqa: E402
     KEYCODE_BACK,
+    DeviceInfo,
     KeyEvent,
+    Platform,
     TextEvent,
     TouchAction,
     TouchEvent,
@@ -96,4 +98,57 @@ def test_main_window_constructs_offscreen(app):
     window.show()
     assert window.windowTitle().startswith("MobileCast")
     assert window._connect_btn.isEnabled()
+    assert window._wireless_btn.isEnabled()
     window.close()
+
+
+class FakeSessionStub:
+    """MirrorWindow 依赖的最小会话接口。"""
+
+    def __init__(self) -> None:
+        self.serial = "FAKE-SERIAL"
+        self.info = DeviceInfo(serial="FAKE-SERIAL", name="Fake Device", platform=Platform.ANDROID)
+        self.on_clipboard = None
+        self.sent: list = []
+        self.stopped = False
+
+    def frames(self):
+        return iter(())
+
+    def send_input(self, event) -> None:
+        self.sent.append(event)
+
+    def send_clipboard(self, text: str, paste: bool = False) -> int:
+        self.sent.append(("clipboard", text, paste))
+        return 1
+
+    def push_file(self, path):
+        return "/sdcard/Download/x"
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_mirror_window_lifecycle_and_clipboard_bridge(app):
+    from mobilecast.ui.mirror_window import MirrorWindow
+
+    session = FakeSessionStub()
+    closed: list[str] = []
+    window = MirrorWindow(session, on_close=closed.append)
+    window.show()
+
+    assert window._clipboard_sync.isChecked()
+    assert window._clipboard_sync.text() == "剪贴板同步"
+
+    # 设备 → PC：设备剪贴板回传应写入系统剪贴板
+    window.device_clipboard.emit("from device")
+    app.processEvents()
+    assert window._clipboard.text() == "from device"
+
+    # PC → device：本地剪贴板变化应同步到设备
+    window._suppress_clipboard = False  # 兜底：确保不被回声抑制挡住
+    window._clipboard.setText("to device")
+    assert ("clipboard", "to device", False) in session.sent
+
+    window.close()
+    assert closed == ["FAKE-SERIAL"]  # 关闭窗口 → 通知管理器断开会话

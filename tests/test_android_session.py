@@ -11,6 +11,8 @@ from mobilecast.core.android.scrcpy_control import (
     encode_inject_scroll,
     encode_inject_text,
     encode_inject_touch,
+    encode_scan_file,
+    encode_set_clipboard,
 )
 from mobilecast.core.android.session import AndroidSession
 from mobilecast.core.device import (
@@ -142,6 +144,64 @@ def test_send_before_connect_raises(env):
     session, *_rest = env
     with pytest.raises(RuntimeError, match="会话未连接"):
         session.send_text(TextEvent(text="x"))
+
+
+def test_device_clipboard_dispatched_to_callback(env):
+    import struct
+    import time
+
+    session, video_dev, video_peer, _ctrl_dev, ctrl_peer, _decoder = env
+    video_peer.sendall(b"\x00" * META_LEN)
+    session.attach_sockets(video_dev, _ctrl_dev)
+
+    received: list[str] = []
+    session.on_clipboard = received.append
+
+    ctrl_peer.sendall(bytes([0]) + struct.pack(">I", 2) + b"hi")  # CLIPBOARD 消息
+    deadline = time.time() + 2
+    while not received and time.time() < deadline:
+        time.sleep(0.01)
+    assert received == ["hi"]
+
+
+def test_send_clipboard_uses_incrementing_sequence(env):
+    session, video_dev, video_peer, _ctrl_dev, ctrl_peer, _decoder = env
+    video_peer.sendall(b"\x00" * META_LEN)
+    session.attach_sockets(video_dev, _ctrl_dev)
+    ctrl_peer.settimeout(2)
+
+    assert session.send_clipboard("hi") == 1
+    assert ctrl_peer.recv(4096) == encode_set_clipboard(1, "hi", paste=False)
+
+    assert session.send_clipboard("again", paste=True) == 2
+    assert ctrl_peer.recv(4096) == encode_set_clipboard(2, "again", paste=True)
+
+
+class FakeAdb:
+    def __init__(self) -> None:
+        self.pushed: list[tuple[str, str, str]] = []
+
+    def push(self, serial, local, remote) -> None:
+        self.pushed.append((serial, str(local), remote))
+
+
+def test_push_file_uploads_and_triggers_media_scan():
+    video_dev, video_peer = socket.socketpair()
+    ctrl_dev, ctrl_peer = socket.socketpair()
+    adb = FakeAdb()
+    session = AndroidSession(adb=adb, serial="TEST-SERIAL", decoder=FakeDecoder(), name="T")
+    video_peer.sendall(b"\x00" * META_LEN)
+    session.attach_sockets(video_dev, ctrl_dev)
+    ctrl_peer.settimeout(2)
+
+    remote = session.push_file("report.pdf")
+    assert remote == "/sdcard/Download/report.pdf"
+    assert adb.pushed == [("TEST-SERIAL", "report.pdf", "/sdcard/Download/report.pdf")]
+    assert ctrl_peer.recv(4096) == encode_scan_file("/sdcard/Download/report.pdf")
+
+    session.stop()
+    for sock in (video_dev, video_peer, ctrl_dev, ctrl_peer):
+        sock.close()
 
 
 def test_stop_closes_session(env):

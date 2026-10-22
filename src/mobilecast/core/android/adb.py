@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -137,6 +138,45 @@ class Adb:
             self._run("forward", "--remove-all")
         except AdbError:
             pass
+
+    # ---- 无线连接 ------------------------------------------------
+    def tcpip(self, serial: str, port: int = 5555) -> str:
+        """让设备的 adbd 在 TCP 端口上监听（之后可用 adb connect 无线连接）。
+
+        注意：设备端 adbd 会重启，USB 连接可能短暂断开。
+        """
+        out = self._run("-s", serial, "tcpip", str(port), timeout=30.0)
+        return out.stdout.decode("utf-8", errors="replace").strip()
+
+    def connect(self, address: str) -> str:
+        """连接无线设备，address 形如 ``192.168.1.8:5555``。"""
+        out = self._run("connect", address, timeout=15.0)
+        return out.stdout.decode("utf-8", errors="replace").strip()
+
+    def disconnect(self, address: str) -> str:
+        try:
+            out = self._run("disconnect", address, timeout=15.0)
+            return out.stdout.decode("utf-8", errors="replace").strip()
+        except AdbError:
+            return ""
+
+    def device_ip(self, serial: str, interface: str = "wlan0") -> str | None:
+        """读取设备在无线网络上的 IPv4 地址；读不到返回 None。"""
+        try:
+            out = self.shell(serial, "ip", "-f", "inet", "addr", "show", interface)
+        except AdbError:
+            out = ""
+        match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+        if match:
+            return match.group(1)
+
+        # 回退：从路由表里找 src 地址
+        try:
+            out = self.shell(serial, "ip", "route")
+        except AdbError:
+            return None
+        match = re.search(r"src (\d+\.\d+\.\d+\.\d+)", out)
+        return match.group(1) if match else None
 
     # ---- shell ---------------------------------------------------
     def shell(self, serial: str, *cmd: str, timeout: float | None = None) -> str:

@@ -41,6 +41,7 @@ __all__ = [
     "encode_set_display_power",
     "encode_set_clipboard",
     "encode_get_clipboard",
+    "encode_scan_file",
     "encode_no_payload",
     "ScrcpyControlWriter",
 ]
@@ -239,6 +240,12 @@ def encode_set_clipboard(sequence: int, text: str, paste: bool = False) -> bytes
 def encode_no_payload(msg_type: ControlMsgType) -> bytes:
     """无负载消息（1 字节），如 RESET_VIDEO / ROTATE_DEVICE / 面板开关等。"""
     return bytes((msg_type,))
+
+
+def encode_scan_file(path: str) -> bytes:
+    """触发设备端媒体库扫描该文件（5+len 字节），配合 adb push 使用。"""
+    raw = path.encode("utf-8")
+    return struct.pack(">BI", ControlMsgType.SCAN_FILE, len(raw)) + raw
 
 
 class ScrcpyControlWriter:

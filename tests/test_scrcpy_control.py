@@ -116,6 +116,12 @@ def test_set_clipboard_layout():
     assert msg.hex() == "09" "0000000000000001" "01" "00000002" "6869"
 
 
+def test_encode_scan_file_layout():
+    path = "/sdcard/Download/a.txt"  # 22 字节
+    msg = sc.encode_scan_file(path)
+    assert msg.hex() == "16" "00000016" + path.encode().hex()
+
+
 def test_no_payload_and_power():
     assert sc.encode_no_payload(sc.ControlMsgType.RESET_VIDEO) == b"\x11"
     assert sc.encode_no_payload(sc.ControlMsgType.ROTATE_DEVICE) == b"\x0b"

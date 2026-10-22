@@ -1,116 +1,88 @@
-"""主窗口：设备列表 + 投屏画面 + 会话管理。
+"""主窗口：设备仪表盘（设备列表、无线连接、多窗口投屏管理）。
 
-数据流：
-    AndroidSession（视频线程解码）→ FramePump(QThread) → MirrorView 渲染
-    MirrorView 键鼠信号 → MainWindow 转发 → session.send_input()
+每台设备的投屏画面在独立的 :class:`MirrorWindow` 中，一设备一窗口。
 """
 
 from __future__ import annotations
 
 import logging
-import time
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.android.adb import Adb, AdbError
-from ..core.android.scrcpy_server import ScrcpyError, ScrcpyOptions, find_server_jar
-from ..core.android.session import AndroidSession
-from ..core.device import InputEvent, SessionState, VideoFrame
-from .mirror_view import MirrorView
+from ..core.android.scrcpy_server import ScrcpyError
+from ..core.session_manager import SessionError, SessionManager
+from .mirror_window import MirrorWindow
+from .tasks import AsyncTask
 
 log = logging.getLogger(__name__)
 
 
-class FramePump(QThread):
-    """在后台线程里拉取会话解码帧并转发给 UI（跨线程走 Qt 信号队列）。"""
-
-    frame_ready = Signal(object)  # VideoFrame
-    failed = Signal(str)
-
-    def __init__(self, session: AndroidSession, parent=None) -> None:
-        super().__init__(parent)
-        self._session = session
-
-    def run(self) -> None:
-        try:
-            for frame in self._session.frames():
-                self.frame_ready.emit(frame)
-        except Exception as exc:  # noqa: BLE001 - 线程边界统一兜底
-            log.exception("帧读取线程异常")
-            self.failed.emit(str(exc))
-
-
 class MainWindow(QMainWindow):
-    def __init__(self, adb: Adb | None = None) -> None:
+    def __init__(
+        self,
+        adb: Adb | None = None,
+        manager: SessionManager | None = None,
+    ) -> None:
         super().__init__()
         self._adb = adb
-        self._session: AndroidSession | None = None
-        self._pump: FramePump | None = None
-        self._frame_count = 0
-        self._fps_t0 = time.monotonic()
+        self._manager = manager or SessionManager(adb)
+        self._windows: dict[str, MirrorWindow] = {}
+        self._tasks: list[AsyncTask] = []
 
         self.setWindowTitle("MobileCast — 移动设备投屏与控制")
-        self.resize(560, 780)
+        self.resize(520, 560)
 
         self._device_list = QListWidget()
-        self._device_list.setMinimumWidth(200)
-        self._device_list.itemDoubleClicked.connect(self._connect_device)
+        self._device_list.itemDoubleClicked.connect(lambda _item: self._connect_current())
 
-        self._mirror = MirrorView()
-        self._mirror_placeholder = QLabel("选择左侧设备并点击「连接」开始投屏")
-        self._mirror_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint = QLabel("双击设备或点「连接」开始投屏（一设备一窗口）\n"
+                      "无线调试：USB 设备选中后点「启用无线调试」，之后可拔线使用")
+        hint.setWordWrap(True)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self._mirror, stretch=1)
-        right_layout.addWidget(self._mirror_placeholder)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._device_list)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-
-        toolbar = QWidget()
-        bar_layout = QHBoxLayout(toolbar)
-        bar_layout.setContentsMargins(8, 8, 8, 0)
         self._refresh_btn = QPushButton("刷新设备")
         self._connect_btn = QPushButton("连接")
-        self._disconnect_btn = QPushButton("断开")
-        self._disconnect_btn.setEnabled(False)
+        self._wireless_btn = QPushButton("启用无线调试")
+        self._connect_ip_btn = QPushButton("连接网络设备…")
+        self._close_all_btn = QPushButton("断开全部")
         self._refresh_btn.clicked.connect(self.refresh_devices)
         self._connect_btn.clicked.connect(self._connect_current)
-        self._disconnect_btn.clicked.connect(self._disconnect)
-        bar_layout.addWidget(self._refresh_btn)
-        bar_layout.addWidget(self._connect_btn)
-        bar_layout.addWidget(self._disconnect_btn)
-        bar_layout.addStretch(1)
+        self._wireless_btn.clicked.connect(self._enable_wireless)
+        self._connect_ip_btn.clicked.connect(self._connect_by_ip)
+        self._close_all_btn.clicked.connect(self._close_all)
+
+        buttons = QWidget()
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        for btn in (
+            self._refresh_btn,
+            self._connect_btn,
+            self._wireless_btn,
+            self._connect_ip_btn,
+            self._close_all_btn,
+        ):
+            button_layout.addWidget(btn)
+        button_layout.addStretch(1)
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(toolbar)
-        layout.addWidget(splitter, stretch=1)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addWidget(buttons)
+        layout.addWidget(self._device_list, stretch=1)
+        layout.addWidget(hint)
         self.setCentralWidget(container)
-
-        # 输入事件统一转发给会话
-        self._mirror.touch_event.connect(self._send_input)
-        self._mirror.key_event.connect(self._send_input)
-        self._mirror.text_event.connect(self._send_input)
-        self._mirror.scroll_event.connect(self._send_input)
 
         self.statusBar().showMessage("就绪")
         self.refresh_devices()
@@ -126,7 +98,8 @@ class MainWindow(QMainWindow):
             return
 
         for device in devices:
-            item = QListWidgetItem(f"{device.model}  [{device.serial}]  ({device.state})")
+            marker = " [投屏中]" if self._manager.is_open(device.serial) else ""
+            item = QListWidgetItem(f"{device.model}  [{device.serial}]  ({device.state}){marker}")
             item.setData(Qt.ItemDataRole.UserRole, device.serial)
             self._device_list.addItem(item)
         self.statusBar().showMessage(f"发现 {len(devices)} 台设备")
@@ -136,104 +109,115 @@ class MainWindow(QMainWindow):
             self._adb = Adb()
         return self._adb
 
-    # ---- 会话 ----------------------------------------------------
-    def _connect_current(self) -> None:
+    def _selected_serial(self) -> str | None:
         item = self._device_list.currentItem()
-        if item is None:
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    # ---- 投屏会话 ------------------------------------------------
+    def _connect_current(self) -> None:
+        serial = self._selected_serial()
+        if serial is None:
             self.statusBar().showMessage("请先选择一台设备")
             return
-        self._connect_device(item)
-
-    def _connect_device(self, item: QListWidgetItem) -> None:
-        self.connect_serial(item.data(Qt.ItemDataRole.UserRole))
+        self.connect_serial(serial)
 
     def connect_serial(self, serial: str) -> None:
-        """连接指定设备（供双击、按钮与 --serial 启动参数共用）。"""
-        if self._session is not None and self._session.state is SessionState.CONNECTED:
-            self.statusBar().showMessage("已有会话连接中，请先断开")
+        """连接指定设备并打开投屏窗口（供双击、按钮与 --serial 共用）。"""
+        if self._manager.is_open(serial):
+            self.statusBar().showMessage(f"设备 {serial} 已在投屏中")
             return
 
+        self.statusBar().showMessage(f"正在连接 {serial} …")
+        try:
+            session = self._manager.open(serial)
+        except (SessionError, ScrcpyError, AdbError, OSError, RuntimeError) as exc:
+            log.warning("连接 %s 失败: %s", serial, exc)
+            if isinstance(exc, ScrcpyError):
+                QMessageBox.warning(self, "无法连接", str(exc))
+            self.statusBar().showMessage(f"连接失败: {exc}")
+            return
+
+        window = MirrorWindow(session, on_close=self._on_window_closed)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._windows[serial] = window
+        window.show()
+        self.refresh_devices()
+
+    def _on_window_closed(self, serial: str) -> None:
+        self._windows.pop(serial, None)
+        self._manager.close(serial)
+        self.refresh_devices()
+
+    def _close_all(self) -> None:
+        for window in list(self._windows.values()):
+            window.close()
+        self._manager.close_all()
+        self.refresh_devices()
+
+    # ---- 无线连接 ------------------------------------------------
+    def _enable_wireless(self) -> None:
+        serial = self._selected_serial()
+        if serial is None:
+            self.statusBar().showMessage("请先选择一台 USB 连接的设备")
+            return
         try:
             adb = self._ensure_adb()
         except AdbError as exc:
             self.statusBar().showMessage(str(exc))
             return
 
+        def flow() -> str:
+            adb.tcpip(serial, 5555)
+            import time
+
+            time.sleep(1.0)  # 等待设备端 adbd 重启
+            ip = adb.device_ip(serial)
+            if not ip:
+                raise RuntimeError("无法读取设备无线 IP，请确认设备已连接 Wi-Fi")
+            address = f"{ip}:5555"
+            adb.connect(address)
+            return address
+
+        self.statusBar().showMessage("正在启用无线调试…")
+        self._run_task(flow, self._on_wireless_ready)
+
+    def _on_wireless_ready(self, address: str) -> None:
+        self.statusBar().showMessage(f"无线调试已启用，可用 {address} 连接（现在可以拔掉 USB 线）")
+        self.refresh_devices()
+
+    def _connect_by_ip(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "连接网络设备", "设备地址（IP:端口）:", text="192.168.1.8:5555"
+        )
+        if not ok or not text.strip():
+            return
+        address = text.strip()
         try:
-            server_jar = find_server_jar()
-        except ScrcpyError as exc:
-            QMessageBox.warning(self, "缺少 scrcpy-server", str(exc))
+            adb = self._ensure_adb()
+        except AdbError as exc:
+            self.statusBar().showMessage(str(exc))
             return
 
-        session = AndroidSession(adb, serial, server_jar, options=ScrcpyOptions())
-        self.statusBar().showMessage(f"正在连接 {serial} …")
-        try:
-            session.start()
-        except (ScrcpyError, OSError, RuntimeError) as exc:
-            session.stop()
-            log.warning("连接 %s 失败: %s", serial, exc)
-            QMessageBox.warning(self, "连接失败", str(exc))
-            self.statusBar().showMessage("连接失败")
-            return
+        def flow() -> str:
+            return adb.connect(address)
 
-        self._session = session
-        self._mirror_placeholder.hide()
-        self._fps_t0 = time.monotonic()
-        self._frame_count = 0
+        self.statusBar().showMessage(f"正在连接 {address} …")
+        self._run_task(flow, self._on_ip_connected)
 
-        self._pump = FramePump(session, self)
-        self._pump.frame_ready.connect(self._on_frame)
-        self._pump.failed.connect(self._on_stream_error)
-        self._pump.start()
+    def _on_ip_connected(self, result: str) -> None:
+        self.statusBar().showMessage(result)
+        self.refresh_devices()
 
-        self._connect_btn.setEnabled(False)
-        self._disconnect_btn.setEnabled(True)
-        self.statusBar().showMessage(f"已连接 {session.info.name}（{serial}）")
-
-    def _disconnect(self) -> None:
-        session, self._session = self._session, None
-        pump, self._pump = self._pump, None
-        if session is not None:
-            session.stop()
-        if pump is not None:
-            pump.wait(3000)
-        self._mirror_placeholder.show()
-        self._connect_btn.setEnabled(True)
-        self._disconnect_btn.setEnabled(False)
-        self.statusBar().showMessage("已断开")
-
-    # ---- 帧渲染 --------------------------------------------------
-    def _on_frame(self, frame: VideoFrame) -> None:
-        self._mirror.set_rgb_frame(frame)
-        self._frame_count += 1
-        now = time.monotonic()
-        elapsed = now - self._fps_t0
-        if elapsed >= 1.0 and self._session is not None:
-            fps = self._frame_count / elapsed
-            self.statusBar().showMessage(
-                f"已连接 {self._session.info.name} · "
-                f"{frame.width}x{frame.height} · {fps:.0f} fps · "
-                f"右键=返回 中键=Home"
-            )
-            self._fps_t0 = now
-            self._frame_count = 0
-
-    def _on_stream_error(self, message: str) -> None:
-        log.error("视频流异常: %s", message)
-        self.statusBar().showMessage(f"视频流中断: {message}")
-        self._disconnect()
-
-    # ---- 输入转发 ------------------------------------------------
-    def _send_input(self, event: InputEvent) -> None:
-        if self._session is None:
-            return
-        try:
-            self._session.send_input(event)
-        except RuntimeError as exc:
-            log.warning("输入注入失败: %s", exc)
+    # ---- 后台任务 ------------------------------------------------
+    def _run_task(self, fn, on_done) -> None:
+        task = AsyncTask(fn, self)
+        task.done.connect(on_done)
+        task.failed.connect(lambda msg: self.statusBar().showMessage(f"操作失败: {msg}"))
+        self._tasks.append(task)
+        task.finished.connect(lambda: self._tasks.remove(task) if task in self._tasks else None)
+        task.start()
 
     # ---- 生命周期 ------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._session is not None:
-            self._disconnect()
+        self._close_all()
         super().closeEvent(event)
